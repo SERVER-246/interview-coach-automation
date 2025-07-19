@@ -1,7 +1,8 @@
+# requirements.txt
+numpy==1.24.3  # Pinned version compatible with pandas
+pandas==2.0.3
+gspread==6.2.1
+oauth2client==4.1.3
 requests==2.31.0
 beautifulsoup4==4.12.2
-pandas==2.0.3
-transformers==4.40.1
-torch==2.2.1
-gspread==6.2.1  # Updated version
-oauth2client==4.1.3
+tenacity==8.2.3
