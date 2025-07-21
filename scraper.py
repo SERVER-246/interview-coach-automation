@@ -10,6 +10,7 @@ import sys
 import os
 import json
 import logging
+import hashlib
 
 # Configure logging
 logging.basicConfig(
@@ -41,7 +42,8 @@ def safe_request(url):
     try:
         logger.info(f"Requesting URL: {url}")
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9'
         }
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
@@ -49,6 +51,21 @@ def safe_request(url):
     except requests.exceptions.RequestException as e:
         logger.error(f"Request failed: {str(e)}")
         return None
+
+def get_question_hash(question):
+    """Create unique hash for question"""
+    return hashlib.md5(question.lower().encode()).hexdigest()
+
+def extract_questions(soup, selector):
+    """Extract questions from HTML using CSS selector"""
+    elements = soup.select(selector)
+    questions = []
+    for element in elements:
+        question = element.get_text().strip()
+        if '?' in question and len(question) > 10:
+            questions.append(question)
+            logger.debug(f"Found question: {question}")
+    return questions
 
 def update_database():
     try:
@@ -64,15 +81,31 @@ def update_database():
             client = gspread.authorize(creds)
             sheet = client.open("InterviewCoach_DB").sheet1
             existing_data = sheet.get_all_records()
+            existing_df = pd.DataFrame(existing_data)
             logger.info(f"Loaded {len(existing_data)} existing records")
+            
+            # Get existing question hashes
+            existing_hashes = set()
+            if not existing_df.empty and 'question' in existing_df.columns:
+                existing_hashes = set(existing_df['question'].apply(get_question_hash))
         except Exception as e:
             logger.critical(f"Google Sheets access failed: {str(e)}")
             return False
         
-        # Scrape sources
+        # Scrape sources (updated selectors)
         sources = [
-            {"url": "https://www.interviewbit.com/data-science-interview-questions/", "selector": ".question-title"},
-            {"url": "https://www.geeksforgeeks.org/python-interview-questions/", "selector": "article h2"}
+            {
+                "url": "https://www.interviewbit.com/data-science-interview-questions/",
+                "selector": "h3.ib-article-title"  # Updated selector
+            },
+            {
+                "url": "https://www.geeksforgeeks.org/python-interview-questions/",
+                "selector": "h2"  # More generic selector
+            },
+            {
+                "url": "https://www.interviewbit.com/python-interview-questions/",
+                "selector": "h3.ib-article-title"  # Additional source
+            }
         ]
         
         new_questions = []
@@ -83,44 +116,47 @@ def update_database():
                 
             try:
                 soup = BeautifulSoup(response.text, 'html.parser')
-                elements = soup.select(source['selector'])
-                logger.info(f"Found {len(elements)} elements at {source['url']}")
-                
-                for element in elements:
-                    question = element.get_text().strip()
-                    if '?' in question:
-                        new_questions.append(question)
-                
+                questions = extract_questions(soup, source['selector'])
+                logger.info(f"Found {len(questions)} questions at {source['url']}")
+                new_questions.extend(questions)
                 time.sleep(2)  # Be polite to servers
             except Exception as e:
                 logger.error(f"Processing error: {str(e)}")
         
         # Add new questions
+        added_count = 0
         if new_questions:
-            logger.info(f"Adding {len(set(new_questions))} new questions")
             for question in set(new_questions):
-                try:
-                    # Simple answer template
-                    answer = (
-                        "This is an important interview question. Focus on providing a clear, "
-                        "structured response that highlights your relevant skills and experience."
-                    )
-                    
-                    sheet.append_row([f"scraped-{int(time.time())}", 
-                                     question, 
-                                     answer,
-                                     "Tech",
-                                     "all",
-                                     "auto-generated",
-                                     "scraped",
-                                     datetime.now().strftime("%Y-%m-%d")])
-                    logger.info(f"Added: {question[:50]}...")
-                except Exception as e:
-                    logger.error(f"Failed to add question: {str(e)}")
+                q_hash = get_question_hash(question)
+                
+                if q_hash not in existing_hashes:
+                    try:
+                        # Simple answer template
+                        answer = (
+                            "This is an important interview question. Focus on providing a clear, "
+                            "structured response that highlights your relevant skills and experience."
+                        )
+                        
+                        sheet.append_row([
+                            f"scraped-{int(time.time())}", 
+                            question, 
+                            answer,
+                            "Tech",
+                            "all",
+                            "auto-generated",
+                            "scraped",
+                            datetime.now().strftime("%Y-%m-%d")
+                        ])
+                        logger.info(f"Added: {question[:50]}...")
+                        added_count += 1
+                        existing_hashes.add(q_hash)
+                    except Exception as e:
+                        logger.error(f"Failed to add question: {str(e)}")
+            logger.info(f"Added {added_count} new questions")
         else:
             logger.info("No new questions found")
         
-        return True
+        return added_count > 0  # Return True if added any questions
         
     except Exception as e:
         logger.critical(f"Critical error in update_database: {str(e)}")
