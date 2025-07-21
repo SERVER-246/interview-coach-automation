@@ -11,16 +11,22 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}  # Critical for write access
+          
       - name: Set up Python 3.10
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
           
+      - name: Clear pip cache
+        run: pip cache purge
+          
       - name: Install core dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy==1.24.3  # Install FIRST before pandas
+          pip install numpy==1.24.3
           pip install -r requirements.txt
           
       - name: Setup Google credentials
@@ -48,6 +54,7 @@ jobs:
         run: |
           git config user.name "Automated Updater"
           git config user.email "actions@users.noreply.github.com"
+          git remote set-url origin https://${{ github.actor }}:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }}.git
           git commit -m "Auto: Daily Q&A Update $(date +'%Y-%m-%d')"
           git push
           
