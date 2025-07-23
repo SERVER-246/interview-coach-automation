@@ -1,44 +1,50 @@
 name: Daily Knowledge Update
+
+# Grant the workflow permission to push commits
+permissions:
+  contents: write
+
 on:
   schedule:
-    - cron: '0 0 * * *'  # 12 AM UTC daily
+    - cron: '0 0 * * *'   # 12 AM UTC daily
   workflow_dispatch:
 
 jobs:
   update:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          token: ${{ secrets.PAT_TOKEN }}   # use your PAT with repo/public_repo scope
           fetch-depth: 0
-          # Remove token parameter here
-          
+
       - name: Set up Python 3.10
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          
+
       - name: Clear pip cache
         run: pip cache purge
-          
+
       - name: Install core dependencies
         run: |
           python -m pip install --upgrade pip
           pip install numpy==1.24.3
           pip install -r requirements.txt
-          
+
       - name: Setup Google credentials
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
         run: |
           echo "$GOOGLE_CREDS" > service-account.json
           echo "Service account created"
-          
+
       - name: Run scraper
         run: python scraper.py
-          
+
       - name: Check for changes
         id: changes
         run: |
@@ -48,18 +54,15 @@ jobs:
           else
             echo "changes=true" >> $GITHUB_OUTPUT
           fi
-          
+
       - name: Commit and push changes
         if: ${{ steps.changes.outputs.changes == 'true' }}
         run: |
           git config user.name "Automated Updater"
           git config user.email "actions@users.noreply.github.com"
-          
-          # Use PAT_TOKEN only for pushing, not for checkout
-          git remote set-url origin https://${{ github.actor }}:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }}.git
           git commit -m "Auto: Daily Q&A Update $(date +'%Y-%m-%d')"
-          git push
-          
+          git push origin HEAD:${{ github.ref_name }}
+
       - name: Upload logs on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
