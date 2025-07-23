@@ -13,7 +13,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.PAT_TOKEN }}  # Critical for write access
+          # Remove token parameter here
           
       - name: Set up Python 3.10
         uses: actions/setup-python@v4
@@ -54,6 +54,8 @@ jobs:
         run: |
           git config user.name "Automated Updater"
           git config user.email "actions@users.noreply.github.com"
+          
+          # Use PAT_TOKEN only for pushing, not for checkout
           git remote set-url origin https://${{ github.actor }}:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }}.git
           git commit -m "Auto: Daily Q&A Update $(date +'%Y-%m-%d')"
           git push
