@@ -1,190 +1,135 @@
-# answer_filler.py
-
 import os
 import sys
-import time
 import json
+import time
 import logging
 import hashlib
-import urllib.parse
+from datetime import datetime
 
 import requests
-import openai
+import pandas as pd
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from bs4 import BeautifulSoup
+from oauth2client.service_account import ServiceAccountCredentials
 
 # ——— Logging Setup ———
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('answer-filler.log')
+    ]
 )
 logger = logging.getLogger("AnswerFiller")
 
-# ——— Config from env/secrets ———
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-GOOGLE_CX      = os.environ.get("GOOGLE_CX")
-BING_API_KEY   = os.environ.get("BING_API_KEY")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+# ——— System Info ———
+def log_system_info():
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"Current directory: {os.getcwd()}")
+    logger.info(f"Files in directory: {os.listdir()}")
 
-if OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
+# ——— Hashing Utility ———
+def get_question_hash(q: str) -> str:
+    return hashlib.md5(q.lower().encode()).hexdigest()
 
-# ——— HTTP helper ———
-def safe_request(url, headers=None, **kwargs):
+# ——— OpenAI Completion ———
+def query_openai(prompt: str) -> str:
     try:
-        hdrs = headers or {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-            'Accept-Language': 'en-US,en;q=0.9'
-        }
-        resp = requests.get(url, headers=hdrs, timeout=15, **kwargs)
-        resp.raise_for_status()
-        return resp
-    except Exception as e:
-        logger.debug(f"Request failed ({url}): {e}")
-        return None
-
-# ——— 1) Source‑page scrape ———
-def scrape_source(link):
-    if not link:
-        return None
-    r = safe_request(link)
-    if not r:
-        return None
-    s = BeautifulSoup(r.text, "html.parser")
-    # InterviewBit
-    el = s.select_one("div.answer-text")
-    if el and el.get_text(strip=True):
-        return el.get_text("\n", strip=True).strip()
-    # GeeksforGeeks
-    cont = s.select_one("div.content")
-    if cont:
-        paras = cont.find_all(["p","pre"])
-        text = "\n\n".join(p.get_text(strip=True) for p in paras if p.get_text(strip=True))
-        if text:
-            return text.strip()
-    # Generic article
-    art = s.find("article")
-    if art and art.get_text(strip=True):
-        return art.get_text("\n", strip=True).strip()
-    return None
-
-# ——— 2) Google Custom Search API ———
-def google_search(q):
-    if not GOOGLE_API_KEY or not GOOGLE_CX:
-        return None
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {"key":GOOGLE_API_KEY,"cx":GOOGLE_CX,"q":q,"num":1}
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["items"][0]["snippet"].strip()
-    except Exception as e:
-        logger.debug(f"Google API failed: {e}")
-        return None
-
-# ——— 3) Bing Web Search API ———
-def bing_search(q):
-    if not BING_API_KEY:
-        return None
-    url = "https://api.bing.microsoft.com/v7.0/search"
-    headers = {"Ocp-Apim-Subscription-Key": BING_API_KEY}
-    params = {"q":q,"count":1}
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        snippet = data.get("webPages",{}).get("value",[])[0].get("snippet")
-        return snippet.strip() if snippet else None
-    except Exception as e:
-        logger.debug(f"Bing API failed: {e}")
-        return None
-
-# ——— 4) OpenAI fallback ———
-def openai_answer(q):
-    if not OPENAI_API_KEY:
-        return ""
-    try:
-        res = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
+        import openai
+        openai.api_key = os.environ.get("OPENAI_API_KEY")
+        if not openai.api_key:
+            raise ValueError("OPENAI_API_KEY not set.")
+        logger.info("Querying OpenAI...")
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
             messages=[
-              {"role":"system","content":"You are a concise, factual assistant."},
-              {"role":"user","content":f"Q: {q}\nA:"}
+                {"role": "system", "content": "Answer concisely and professionally."},
+                {"role": "user", "content": prompt}
             ],
-            max_tokens=200,
-            temperature=0.2,
+            temperature=0.4,
+            max_tokens=400
         )
-        return res.choices[0].message.content.strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        logger.debug(f"OpenAI call failed: {e}")
+        logger.error(f"OpenAI failed: {e}")
         return ""
 
-# ——— Master extractor ———
-def extract_answer(link, qtext):
-    # 1) Try source page
-    ans = scrape_source(link)
-    if ans:
-        logger.info("Answer from source page")
-        return ans
+# ——— SerpAPI Fallback ———
+def query_serpapi(question: str) -> str:
+    try:
+        api_key = os.environ.get("SERPAPI_KEY")
+        if not api_key:
+            raise ValueError("SERPAPI_KEY not set.")
 
-    # 2) Try Google Custom Search
-    ans = google_search(qtext)
-    if ans:
-        logger.info("Answer from Google API")
-        return ans
+        logger.info("Querying SerpAPI...")
+        params = {
+            "q": question,
+            "api_key": api_key,
+            "engine": "google",
+            "num": 3
+        }
+        resp = requests.get("https://serpapi.com/search", params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
 
-    # 3) Try Bing Search
-    ans = bing_search(qtext)
-    if ans:
-        logger.info("Answer from Bing API")
-        return ans
-
-    # 4) OpenAI fallback
-    ans = openai_answer(qtext)
-    if ans:
-        logger.info("Answer from OpenAI")
-        return ans
-
-    logger.warning("All methods failed; leaving blank")
+        # Snippet logic
+        for result in data.get("organic_results", []):
+            snippet = result.get("snippet")
+            if snippet:
+                return snippet.strip()
+    except Exception as e:
+        logger.error(f"SerpAPI failed: {e}")
     return ""
 
-# ——— Main: fill the sheet ———
-def fill_answers():
-    # Auth
-    scope = ['https://spreadsheets.google.com/feeds',
-             'https://www.googleapis.com/auth/drive']
-    creds  = ServiceAccountCredentials.from_json_keyfile_name('service-account.json', scope)
-    client = gspread.authorize(creds)
-    sheet  = client.open("InterviewCoach_DB").sheet1
+# ——— Answer Filler ———
+def get_answer(question: str) -> str:
+    # 1. OpenAI
+    answer = query_openai(question)
+    if answer:
+        return answer
+    # 2. SerpAPI fallback
+    return query_serpapi(question)
 
-    # Locate columns
-    headers = sheet.row_values(1)
-    q_col = headers.index("question")+1
-    a_col = headers.index("answer")+1
-    link_col = headers.index("link")+1 if "link" in headers else None
+# ——— Google Sheets Setup ———
+def update_sheet_with_answers():
+    logger.info("===== Starting Answer Filler =====")
+    log_system_info()
 
-    records = sheet.get_all_records()
-    for idx, row in enumerate(records, start=2):
-        if row.get("answer","").strip():
-            continue  # already answered
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    try:
+        creds = ServiceAccountCredentials.from_json_keyfile_name('service-account.json', scope)
+        client = gspread.authorize(creds)
+        sheet = client.open("InterviewCoach_DB").sheet1
+        rows = sheet.get_all_records()
+        df = pd.DataFrame(rows)
+        logger.info(f"Fetched {len(df)} rows from sheet.")
+    except Exception as e:
+        logger.critical(f"Sheets access failed: {e}")
+        return False
 
-        qtext = row["question"]
-        link  = row.get("link") if link_col else None
+    filled = 0
+    for i, row in df.iterrows():
+        answer = row.get("answer", "").strip()
+        question = row.get("question", "").strip()
+        if not answer and question:
+            logger.info(f"Filling missing answer for row {i+2}: {question[:60]}...")
+            new_answer = get_answer(question)
+            if new_answer:
+                try:
+                    sheet.update_cell(i + 2, 3, new_answer)  # Row index + header + col (3 = 'answer')
+                    filled += 1
+                    time.sleep(1)
+                except Exception as e:
+                    logger.error(f"Failed to update sheet for row {i+2}: {e}")
 
-        logger.info(f"Filling row {idx}: {qtext[:50]}...")
-        answer = extract_answer(link, qtext)
-        if not answer:
-            logger.warning(f"No answer found for row {idx}")
-            continue
-
-        try:
-            sheet.update_cell(idx, a_col, answer)
-            logger.info(f"Row {idx} updated")
-            time.sleep(1)  # avoid rate limits
-        except Exception as e:
-            logger.error(f"Failed to update row {idx}: {e}")
+    logger.info(f"Answers filled: {filled}")
+    return True
 
 if __name__ == "__main__":
-    fill_answers()
+    try:
+        update_sheet_with_answers()
+        logger.info("===== Answer filler completed successfully =====")
+    except Exception as e:
+        logger.critical(f"Uncaught exception: {e}")
+        sys.exit(1)
