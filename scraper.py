@@ -36,8 +36,8 @@ def log_system_info():
         logger.error(f"Service account error: {e}")
 
 
-def safe_request(url: str, **kwargs) -> requests.Response | None:
-    """GET + raise_for_status, return response or None."""
+def safe_request(url: str, **kwargs):
+    """Perform one GET + raise_for_status, return response or None."""
     try:
         logger.info(f"Requesting URL: {url}")
         headers = {
@@ -57,72 +57,64 @@ def get_question_hash(q: str) -> str:
 
 
 def extract_questions(soup: BeautifulSoup, src_url: str, selector: str):
-    results: list[dict] = []
+    items = []
     for el in soup.select(selector):
         text = el.get_text(strip=True)
         if '?' not in text or len(text) < 10:
             continue
-        # link if present
         a = el.find('a', href=True)
         link = urllib.parse.urljoin(src_url, a['href']) if a else None
-        results.append({"text": text, "link": link})
-    # fallback to <li>
-    if not results:
+        items.append({'text': text, 'link': link})
+    if not items:
         for li in soup.find_all('li'):
             text = li.get_text(strip=True)
             if '?' not in text or len(text) < 10:
                 continue
-            results.append({"text": text, "link": None})
-    return results
+            items.append({'text': text, 'link': None})
+    return items
 
 
 def extract_answer(link: str | None, question_text: str) -> str:
-    """
-    If link is given, scrape that page; otherwise Google-search the question_text.
-    """
+    # 1) If we have a link, try scraping that page
     if link:
         resp = safe_request(link)
         if resp:
             sub = BeautifulSoup(resp.text, 'html.parser')
-            # try InterviewBit
+            # InterviewBit
             ans = sub.select_one('div.answer-text')
-            if ans:
+            if ans and ans.get_text(strip=True):
                 return ans.get_text("\n", strip=True)
-            # try GfG
+            # GfG
             cont = sub.select_one('div.content')
             if cont:
                 paras = cont.find_all(['p','pre'])
                 if paras:
                     return "\n\n".join(p.get_text(strip=True) for p in paras)
-            # fallback to <article>
+            # article fallback
             art = sub.find('article')
             if art:
                 return art.get_text("\n", strip=True)
-    # no link or no scrapeable answer → Google fallback
+
+    # 2) Google fallback
     return search_google(question_text)
 
 
 def search_google(question_text: str) -> str:
-    """
-    Hit Google, grab the first organic snippet, filtering out ads and panels.
-    """
+    """Scrape the first organic snippet from Google search."""
     query = urllib.parse.quote_plus(question_text)
     url = f"https://www.google.com/search?q={query}&hl=en&num=5"
     resp = safe_request(url)
     if not resp:
         return ""
     soup = BeautifulSoup(resp.text, 'html.parser')
-    for g in soup.select('div.g'):
-        # skip knowledge panels / “People also ask”
-        if g.select_one('[data-attrid]'):
-            continue
-        # organic text snippet
-        snip = g.select_one('div.VwiC3b')
-        if snip:
-            txt = snip.get_text(" ", strip=True)
-            if "Ad " in txt or "Sponsored" in txt:
-                continue
-            return txt
+
+    # Google’s current organic snippet container:
+    snip = soup.select_one('div.IsZvec')
+    if snip:
+        text = snip.get_text(" ", strip=True)
+        if not any(x in text for x in ("Ad ", "Sponsored")):
+            return text
+
     return ""
 
 
@@ -150,7 +142,7 @@ def update_database() -> bool:
         {"url":"https://www.interviewbit.com/python-interview-questions/","selector":"div.markdown-content h3"}
     ]
 
-    all_qs: list[dict] = []
+    all_qs = []
     for src in sources:
         resp = safe_request(src["url"])
         if not resp: continue
@@ -161,8 +153,8 @@ def update_database() -> bool:
         time.sleep(2)
 
     added = 0
-    for q in { (item["text"], item["link"]) for item in all_qs }:
-        text, link = q
+    # dedupe by text+link
+    for text, link in { (q['text'], q['link']) for q in all_qs }:
         h = get_question_hash(text)
         if h in existing_hashes:
             continue
